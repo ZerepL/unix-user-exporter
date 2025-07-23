@@ -1,84 +1,95 @@
 # Unix User Exporter
 
-Prometheus exporter that exposes metrics about currently logged-in users on a Unix system using the `w` command. Ideal for tracking active sessions on shared servers.
+A lightweight Prometheus exporter that monitors currently logged-in users on Unix/Linux systems by directly parsing the utmp file. Perfect for tracking active sessions on servers, workstations, and shared systems.
 
-## Supported Architectures
+## Key Features
 
-- `amd64` - x86-64 compatible CPUs
-- `arm64` - 64-bit ARM CPUs (e.g., Raspberry Pi 4 with 64-bit OS)
-- `armv7` - 32-bit ARM CPUs (e.g., Raspberry Pi 3 and earlier)
+- **Direct utmp file parsing** - No dependency on system commands, works reliably in containers
+- **Container-friendly** - Works perfectly in Docker without special privileges
+- **Multi-architecture support** - Available for amd64, arm64, and armv7
+- **Real-time monitoring** - Updates metrics every 15 seconds
+- **Comprehensive metrics** - Username, TTY, origin IP, login time, session counts
 
-## Features
-
-- Exports total number of logged-in users
-- Provides detailed information about each user session including:
-  - Username
-  - Origin IP address
-  - TTY
-  - Login time
-  - Idle time
-  - CPU usage
-  - Running commands
-- Counts sessions per user
-- Counts sessions per origin IP
-
-## Metrics
-
-The exporter provides the following metrics:
-
-- `unix_users_logged_in_total`: Total number of users currently logged in
-- `unix_user_session_info`: Information about each user session with labels for username, IP, TTY, etc.
-- `unix_user_session_count`: Number of sessions per user
-- `unix_user_session_by_ip`: Number of sessions per origin IP
-
-## Usage
+## Quick Start
 
 ```bash
-# Pull the image
-docker pull zerepl/unix-user-exporter:latest
-
-# Run with default settings (port 32142)
-docker run -p 32142:32142 -v /var/run/utmp:/var/run/utmp:ro zerepl/unix-user-exporter:latest
-
-# Run with custom port mapping
-docker run -p 8080:32142 -v /var/run/utmp:/var/run/utmp:ro zerepl/unix-user-exporter:latest
-
-# Run with custom metrics path
-docker run -p 32142:32142 -v /var/run/utmp:/var/run/utmp:ro zerepl/unix-user-exporter:latest --web.telemetry-path=/metrics/users
+# Run with Docker
+docker run -d \
+  --name unix-user-exporter \
+  -p 32142:32142 \
+  -v /var/run/utmp:/var/run/utmp:ro \
+  zerepl/unix-user-exporter:latest
 ```
 
-> **Important**: To monitor host system users (not container users), you must mount the host's `/var/run/utmp` file into the container as shown above.
+## Metrics Provided
+
+- `unix_users_logged_in_total`: Total number of users currently logged in
+- `unix_user_session_info`: Detailed session information with labels (username, tty, origin, login_time)
+- `unix_user_session_count`: Number of active sessions per user
+- `unix_user_session_by_ip`: Number of sessions per origin IP/hostname
+
+## Usage Examples
+
+### Basic Usage
+```bash
+docker run -p 32142:32142 \
+  -v /var/run/utmp:/var/run/utmp:ro \
+  zerepl/unix-user-exporter:latest
+```
+
+### With Custom Port
+```bash
+docker run -p 8080:8080 \
+  -v /var/run/utmp:/var/run/utmp:ro \
+  zerepl/unix-user-exporter:latest \
+  --web.listen-address=:8080
+```
+
+### With Debug Logging
+```bash
+docker run -p 32142:32142 \
+  -v /var/run/utmp:/var/run/utmp:ro \
+  zerepl/unix-user-exporter:latest \
+  --debug
+```
+
+## Architecture Support
+
+- `linux/amd64` - x86-64 compatible CPUs
+- `linux/arm64` - 64-bit ARM CPUs (Raspberry Pi 4, Apple Silicon)
+- `linux/arm/v7` - 32-bit ARM CPUs (Raspberry Pi 3 and earlier)
+
+## Requirements
+
+- Linux system with `/var/run/utmp` file
+- Docker or container runtime
+- Read access to the utmp file
+
+## Configuration Options
+
+- `--web.listen-address`: Address to listen on (default: `:32142`)
+- `--web.telemetry-path`: Metrics endpoint path (default: `/metrics`)
+- `--utmp-path`: Path to utmp file (default: `/var/run/utmp`)
+- `--debug`: Enable debug logging
 
 ## Prometheus Configuration
-
-Add the following to your `prometheus.yml`:
 
 ```yaml
 scrape_configs:
   - job_name: 'unix-users'
     static_configs:
       - targets: ['localhost:32142']
+    scrape_interval: 30s
 ```
 
-## Docker Compose Example
+## Performance
 
-```yaml
-version: '3'
+- **Memory**: ~5-10MB
+- **CPU**: Minimal usage
+- **I/O**: Single file read every 15 seconds
+- **Security**: Read-only access, no sensitive data exposure
 
-services:
-  unix-user-exporter:
-    image: zerepl/unix-user-exporter:latest
-    ports:
-      - "32142:32142"
-    volumes:
-      - /var/run/utmp:/var/run/utmp:ro
-    restart: unless-stopped
-```
+Perfect for monitoring user activity on servers, workstations, and shared systems in containerized environments.
 
-## Source Code
-
-The source code for this image is available on GitHub: [https://github.com/zerepl/unix-user-exporter](https://github.com/zerepl/unix-user-exporter)
-
-## License
-
-This image is distributed under the MIT License.
+**Source**: https://github.com/zerepl/unix-user-exporter
+**License**: MIT

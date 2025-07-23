@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -18,6 +17,20 @@ var (
 	metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics")
 	debugMode     = flag.Bool("debug", false, "Enable debug logging")
 	utmpPath      = flag.String("utmp-path", "/var/run/utmp", "Path to the utmp file")
+)
+
+// utmp entry types
+const (
+	EMPTY         = 0
+	RUN_LVL       = 1
+	BOOT_TIME     = 2
+	NEW_TIME      = 3
+	OLD_TIME      = 4
+	INIT_PROCESS  = 5
+	LOGIN_PROCESS = 6
+	USER_PROCESS  = 7
+	DEAD_PROCESS  = 8
+	ACCOUNTING    = 9
 )
 
 // Define metrics
@@ -64,6 +77,31 @@ func init() {
 	prometheus.MustRegister(userSessionByIP)
 }
 
+func parseUtmpEntry(data []byte) (int32, int32, string, string, string, time.Time) {
+	if len(data) < 384 {
+		return 0, 0, "", "", "", time.Time{}
+	}
+
+	// Parse fields manually from byte array
+	entryType := int32(data[0]) | int32(data[1])<<8 | int32(data[2])<<16 | int32(data[3])<<24
+	pid := int32(data[4]) | int32(data[5])<<8 | int32(data[6])<<16 | int32(data[7])<<24
+	
+	// Line starts at offset 8, 32 bytes
+	line := strings.TrimRight(string(data[8:40]), "\x00")
+	
+	// User starts at offset 44, 32 bytes  
+	user := strings.TrimRight(string(data[44:76]), "\x00")
+	
+	// Host starts at offset 76, 256 bytes
+	host := strings.TrimRight(string(data[76:332]), "\x00")
+	
+	// Time starts at offset 340, 8 bytes (2 int32s)
+	timeSec := int32(data[340]) | int32(data[341])<<8 | int32(data[342])<<16 | int32(data[343])<<24
+	loginTime := time.Unix(int64(timeSec), 0)
+	
+	return entryType, pid, user, line, host, loginTime
+}
+
 func collectUserMetrics() {
 	// Check if utmp file exists
 	if _, err := os.Stat(*utmpPath); os.IsNotExist(err) {
@@ -71,52 +109,28 @@ func collectUserMetrics() {
 		return
 	}
 
-	// Try multiple commands to get user information
-	var output []byte
-	var err error
-	var cmdOutput string
+	// Open and read utmp file
+	file, err := os.Open(*utmpPath)
+	if err != nil {
+		log.Printf("Error opening utmp file %s: %v", *utmpPath, err)
+		return
+	}
+	defer file.Close()
 
-	// Try 'last' command with -f flag to specify utmp file
-	cmd := exec.Command("last", "-f", *utmpPath, "-R")
-	output, err = cmd.Output()
-	if err == nil {
-		cmdOutput = string(output)
-		if *debugMode {
-			log.Printf("Last command output: %s", cmdOutput)
-		}
-	} else if *debugMode {
-		log.Printf("Error executing 'last -f %s -R' command: %v", *utmpPath, err)
+	// Get file info
+	fileInfo, err := file.Stat()
+	if err != nil {
+		log.Printf("Error getting file info: %v", err)
+		return
 	}
 
-	// If 'last' fails or returns no useful data, try 'who'
-	if err != nil || !strings.Contains(cmdOutput, "still logged in") {
-		// Try 'who' command
-		cmd = exec.Command("who")
-		output, err = cmd.Output()
-		if err == nil {
-			cmdOutput = string(output)
-			if *debugMode {
-				log.Printf("Who command output: %s", cmdOutput)
-			}
-		} else if *debugMode {
-			log.Printf("Error executing 'who' command: %v", err)
-		}
-	}
+	entrySize := 384 // Standard Linux utmp entry size
+	fileSize := fileInfo.Size()
+	numEntries := int(fileSize) / entrySize
 
-	// If both 'last' and 'who' fail, try 'w'
-	if err != nil || cmdOutput == "" {
-		// Try 'w' command
-		cmd = exec.Command("w", "-h")
-		output, err = cmd.Output()
-		if err == nil {
-			cmdOutput = string(output)
-			if *debugMode {
-				log.Printf("W command output: %s", cmdOutput)
-			}
-		} else if *debugMode {
-			log.Printf("Error executing 'w -h' command: %v", err)
-			return
-		}
+	if *debugMode {
+		log.Printf("utmp file size: %d bytes, entry size: %d bytes, entries: %d", 
+			fileSize, entrySize, numEntries)
 	}
 
 	// Reset metrics before collecting new data
@@ -124,55 +138,71 @@ func collectUserMetrics() {
 	userSessionCount.Reset()
 	userSessionByIP.Reset()
 
-	// Parse the output
-	lines := strings.Split(cmdOutput, "\n")
-	
-	// Count valid lines (users)
-	validLines := 0
+	// Count valid sessions
+	validSessions := 0
 	userCounts := make(map[string]int)
 	ipCounts := make(map[string]int)
 
-	for _, line := range lines {
-		if line == "" || strings.Contains(line, "wtmp begins") || !strings.Contains(line, "still logged in") {
-			continue
+	// Read all data at once
+	data := make([]byte, fileSize)
+	_, err = file.Read(data)
+	if err != nil {
+		log.Printf("Error reading utmp file: %v", err)
+		return
+	}
+
+	// Parse each entry
+	for i := 0; i < numEntries; i++ {
+		offset := i * entrySize
+		if offset+entrySize > len(data) {
+			break
 		}
-		
-		// Split the line into fields
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
+
+		entryData := data[offset : offset+entrySize]
+		entryType, pid, username, tty, host, loginTime := parseUtmpEntry(entryData)
+
+		if *debugMode {
+			log.Printf("Entry %d: type=%d, pid=%d, user='%s', line='%s', host='%s'", 
+				i, entryType, pid, username, tty, host)
+		}
+
+		// Only process USER_PROCESS entries (active user sessions)
+		if entryType != USER_PROCESS {
 			continue
 		}
 
-		validLines++
-		username := fields[0]
-		tty := fields[1]
-		
-		// Handle the 'from' field which might contain IP or hostname
-		from := "-"
-		if len(fields) > 2 {
-			from = fields[2]
+		// Skip empty usernames
+		if username == "" {
+			continue
 		}
-		
-		// Get login time
-		loginTime := "-"
-		if len(fields) > 3 {
-			loginTime = strings.Join(fields[3:5], " ")
+
+		loginTimeStr := loginTime.Format("2006-01-02 15:04")
+
+		if *debugMode {
+			log.Printf("Found user session: user=%s, tty=%s, host=%s, time=%s", 
+				username, tty, host, loginTimeStr)
 		}
+
+		validSessions++
 
 		// Increment user count
 		userCounts[username]++
 
-		// Increment IP count (if it's an IP address)
-		if from != "-" && from != ":0" && from != ":0.0" {
-			ipCounts[from]++
+		// Increment IP count (if it's not empty and not local)
+		if host != "" && host != ":0" && host != ":0.0" && host != "console" {
+			ipCounts[host]++
 		}
 
 		// Set user session info
-		userSessions.WithLabelValues(username, from, tty, loginTime).Set(1)
+		from := host
+		if from == "" {
+			from = "-"
+		}
+		userSessions.WithLabelValues(username, from, tty, loginTimeStr).Set(1)
 	}
 
 	// Set total users metric
-	totalUsers.Set(float64(validLines))
+	totalUsers.Set(float64(validSessions))
 
 	// Set user count metrics
 	for username, count := range userCounts {
@@ -182,6 +212,11 @@ func collectUserMetrics() {
 	// Set IP count metrics
 	for ip, count := range ipCounts {
 		userSessionByIP.WithLabelValues(ip).Set(float64(count))
+	}
+
+	if *debugMode {
+		log.Printf("Collected metrics: %d total sessions, %d unique users, %d unique IPs", 
+			validSessions, len(userCounts), len(ipCounts))
 	}
 }
 

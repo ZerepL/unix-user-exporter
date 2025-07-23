@@ -1,70 +1,49 @@
-# Docker Repository Overview: unix-user-exporter
+# Unix User Exporter - Docker Repository
 
-## Repository Information
+This repository contains the Docker images for the Unix User Exporter, a lightweight Prometheus exporter that monitors currently logged-in users on Unix/Linux systems.
 
-- **Repository Name**: zerepl/unix-user-exporter
-- **Docker Hub URL**: [https://hub.docker.com/r/zerepl/unix-user-exporter](https://hub.docker.com/r/zerepl/unix-user-exporter)
-- **Description**: Prometheus exporter that exposes metrics about currently logged-in users on a Unix system using the `w` command.
+## Features
 
-## Available Tags
+- **Direct utmp file parsing** - Reliable operation in containers without system command dependencies
+- **Multi-architecture support** - Images available for amd64, arm64, and armv7
+- **Container-optimized** - Small image size, minimal resource usage
+- **Production-ready** - Stable, secure, and well-tested
 
-| Tag | Description | Architectures | Size | Last Updated |
-|-----|-------------|--------------|------|-------------|
-| `latest` | Latest stable build | amd64, arm64, armv7 | ~12MB | July 22, 2025 |
-| `v1.0.0` | Initial release | amd64, arm64, armv7 | ~12MB | July 22, 2025 |
+## Supported Architectures
 
-## Usage
+- `linux/amd64` - Intel/AMD 64-bit processors
+- `linux/arm64` - 64-bit ARM processors (Raspberry Pi 4, Apple Silicon, AWS Graviton)
+- `linux/arm/v7` - 32-bit ARM processors (Raspberry Pi 3 and earlier)
 
-Pull the image:
+## Quick Start
+
 ```bash
-docker pull zerepl/unix-user-exporter:latest
+docker run -d \
+  --name unix-user-exporter \
+  -p 32142:32142 \
+  -v /var/run/utmp:/var/run/utmp:ro \
+  zerepl/unix-user-exporter:latest
 ```
 
-Run the container:
-```bash
-docker run -p 32142:32142 zerepl/unix-user-exporter:latest
-```
+## Tags
 
-With custom port:
-```bash
-docker run -p 8080:32142 zerepl/unix-user-exporter:latest
-```
+- `latest` - Latest stable release
+- `v2.x.x` - Specific version tags
+- `main` - Development builds (not recommended for production)
 
-With custom metrics path:
-```bash
-docker run -p 32142:32142 zerepl/unix-user-exporter:latest --web.telemetry-path=/metrics/users
-```
+## Image Details
 
-## Environment Variables
+- **Base Image**: Alpine Linux (minimal footprint)
+- **Size**: ~15MB compressed
+- **User**: Runs as non-root user
+- **Exposed Port**: 32142
+- **Volume**: `/var/run/utmp` (read-only)
 
-This image doesn't currently use environment variables for configuration. All configuration is done via command-line flags.
+## Usage in Production
 
-## Exposed Ports
-
-- **32142**: Default HTTP port for metrics endpoint
-
-## Volumes
-
-No volumes are required for this container.
-
-## Health Check
-
-You can use the following health check in your Docker Compose or Docker run commands:
-
+### Docker Compose
 ```yaml
-healthcheck:
-  test: ["CMD", "wget", "-q", "--spider", "http://localhost:32142/"]
-  interval: 30s
-  timeout: 10s
-  retries: 3
-  start_period: 5s
-```
-
-## Docker Compose Example
-
-```yaml
-version: '3'
-
+version: '3.8'
 services:
   unix-user-exporter:
     image: zerepl/unix-user-exporter:latest
@@ -73,34 +52,53 @@ services:
     volumes:
       - /var/run/utmp:/var/run/utmp:ro
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:32142/"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 5s
 ```
 
-## Building the Image Locally
-
-```bash
-git clone https://github.com/zerepl/unix-user-exporter.git
-cd unix-user-exporter
-docker build -t unix-user-exporter .
+### Kubernetes
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: unix-user-exporter
+spec:
+  selector:
+    matchLabels:
+      app: unix-user-exporter
+  template:
+    metadata:
+      labels:
+        app: unix-user-exporter
+    spec:
+      containers:
+      - name: unix-user-exporter
+        image: zerepl/unix-user-exporter:latest
+        ports:
+        - containerPort: 32142
+        volumeMounts:
+        - name: utmp
+          mountPath: /var/run/utmp
+          readOnly: true
+      volumes:
+      - name: utmp
+        hostPath:
+          path: /var/run/utmp
 ```
 
-## Security Considerations
+## Security
 
-- The container runs as root by default
-- The exporter only provides read-only metrics
-- No sensitive information is exposed beyond what the `w` command shows
+- Images are built from source with reproducible builds
+- No privileged access required
+- Read-only file system access
+- Regular security updates
 
-## Maintenance and Updates
+## Support
 
-- Images are automatically rebuilt when new versions are released
-- Security patches are applied regularly
-- Follow the repository on Docker Hub for update notifications
+- **Documentation**: https://github.com/zerepl/unix-user-exporter
+- **Issues**: https://github.com/zerepl/unix-user-exporter/issues
+- **License**: MIT
 
-## License
+## Build Information
 
-This image is distributed under the MIT License.
+Images are automatically built and published using GitHub Actions with multi-architecture support. Each release is tagged and includes security scanning.
+
+**Source Repository**: https://github.com/zerepl/unix-user-exporter
