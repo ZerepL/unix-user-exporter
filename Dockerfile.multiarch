@@ -1,4 +1,9 @@
-FROM golang:1.21-alpine as builder
+FROM --platform=$BUILDPLATFORM golang:1.21-alpine as builder
+
+ARG BUILDPLATFORM
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -6,10 +11,11 @@ RUN go mod download
 
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 go build -ldflags="-w -s" -o unix-user-exporter .
+# Build with proper flags for cross-compilation
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -ldflags="-w -s" -o unix-user-exporter .
 
-FROM alpine:latest
+FROM --platform=$TARGETPLATFORM alpine:latest
 
 # Install debugging tools and wget for health check
 RUN apk --no-cache add ca-certificates file wget

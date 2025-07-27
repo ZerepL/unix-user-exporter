@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -79,27 +80,133 @@ func init() {
 
 func parseUtmpEntry(data []byte) (int32, int32, string, string, string, time.Time) {
 	if len(data) < 384 {
+		if *debugMode {
+			log.Printf("Data too short: got %d bytes, expected at least 384", len(data))
+		}
 		return 0, 0, "", "", "", time.Time{}
 	}
 
-	// Parse fields manually from byte array
+	// Parse entry type (first 4 bytes, little endian)
 	entryType := int32(data[0]) | int32(data[1])<<8 | int32(data[2])<<16 | int32(data[3])<<24
+	
+	// Parse PID (next 4 bytes)
 	pid := int32(data[4]) | int32(data[5])<<8 | int32(data[6])<<16 | int32(data[7])<<24
 	
-	// Line starts at offset 8, 32 bytes
+	// Validate entry type
+	if entryType < 0 || entryType > 9 {
+		if *debugMode {
+			log.Printf("Invalid entry type %d", entryType)
+		}
+		return 0, 0, "", "", "", time.Time{}
+	}
+	
+	if *debugMode && (entryType == 7 || entryType == 8) {
+		log.Printf("Raw entry data (first 100 bytes): %x", data[:100])
+	}
+	
+	// Based on hexdump analysis of ARM64 utmp:
+	// Line field starts at offset 8, 32 bytes
 	line := strings.TrimRight(string(data[8:40]), "\x00")
 	
-	// User starts at offset 44, 32 bytes  
+	// ID field at offset 40, 4 bytes (skip)
+	
+	// User field starts at offset 44, 32 bytes
 	user := strings.TrimRight(string(data[44:76]), "\x00")
 	
-	// Host starts at offset 76, 256 bytes
+	// Host field starts at offset 76, 256 bytes
 	host := strings.TrimRight(string(data[76:332]), "\x00")
 	
-	// Time starts at offset 340, 8 bytes (2 int32s)
+	// Special handling for DEAD_PROCESS entries - they might have different structure
+	if entryType == 8 && user == "" {
+		// For DEAD_PROCESS, try to extract user info from different locations
+		// Look for user data in the area around offset 44-100
+		for offset := 44; offset < 100; offset += 1 {
+			if offset+8 > len(data) {
+				break
+			}
+			testUser := strings.TrimRight(string(data[offset:offset+8]), "\x00")
+			if len(testUser) > 0 && len(testUser) < 32 && isValidUsername(testUser) {
+				user = testUser
+				if *debugMode {
+					log.Printf("Found DEAD_PROCESS user '%s' at offset %d", user, offset)
+				}
+				break
+			}
+		}
+		
+		// Look for host data in the expected area and beyond
+		if host == "" {
+			for offset := 76; offset < 400; offset += 4 {
+				if offset+16 > len(data) {
+					break
+				}
+				testHost := strings.TrimRight(string(data[offset:offset+16]), "\x00")
+				if len(testHost) > 6 && (strings.Contains(testHost, ".") || strings.Contains(testHost, ":")) {
+					host = testHost
+					if *debugMode {
+						log.Printf("Found DEAD_PROCESS host '%s' at offset %d", host, offset)
+					}
+					break
+				}
+			}
+		}
+		
+		// If still no user found, try a broader search
+		if user == "" {
+			// Look for common usernames in the data
+			dataStr := string(data)
+			commonUsers := []string{"root", "admin", "user", "pi", "zerepl", "ubuntu", "debian"}
+			for _, testUser := range commonUsers {
+				if strings.Contains(dataStr, testUser) {
+					user = testUser
+					if *debugMode {
+						log.Printf("Found DEAD_PROCESS user '%s' via string search", user)
+					}
+					break
+				}
+			}
+		}
+	}
+	
+	// Exit field at offset 332, 4 bytes (skip)
+	
+	// Session at offset 336, 4 bytes (skip)
+	
+	// Time at offset 340, 8 bytes (tv_sec + tv_usec)
 	timeSec := int32(data[340]) | int32(data[341])<<8 | int32(data[342])<<16 | int32(data[343])<<24
-	loginTime := time.Unix(int64(timeSec), 0)
+	timeUsec := int32(data[344]) | int32(data[345])<<8 | int32(data[346])<<16 | int32(data[347])<<24
+	
+	var loginTime time.Time
+	if timeSec > 0 && timeSec < 2147483647 {
+		loginTime = time.Unix(int64(timeSec), int64(timeUsec)*1000)
+	} else {
+		loginTime = time.Now()
+	}
+	
+	if *debugMode {
+		log.Printf("ARM64 parsed entry: type=%d, pid=%d, user='%s', line='%s', host='%s', time=%v", 
+			entryType, pid, user, line, host, loginTime)
+	}
 	
 	return entryType, pid, user, line, host, loginTime
+}
+
+// isValidUsername checks if a string looks like a valid username
+func isValidUsername(s string) bool {
+	if len(s) == 0 || len(s) > 32 {
+		return false
+	}
+	// Check for printable ASCII characters typical in usernames
+	for _, c := range s {
+		if c < 32 || c > 126 {
+			return false
+		}
+		// Usernames typically don't contain these characters
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 func collectUserMetrics() {
@@ -124,7 +231,7 @@ func collectUserMetrics() {
 		return
 	}
 
-	entrySize := 384 // Standard Linux utmp entry size
+	entrySize := 384 // Fixed utmp entry size for Linux
 	fileSize := fileInfo.Size()
 	numEntries := int(fileSize) / entrySize
 
@@ -151,23 +258,45 @@ func collectUserMetrics() {
 		return
 	}
 
-	// Parse each entry
-	for i := 0; i < numEntries; i++ {
-		offset := i * entrySize
-		if offset+entrySize > len(data) {
-			break
+	// Parse each entry, but also scan for misaligned entries
+	entryIndex := 0
+	for offset := 0; offset < len(data)-384; offset += 4 {
+		// Check if this looks like a valid entry start
+		if offset%384 == 0 {
+			entryIndex = offset / 384
 		}
-
-		entryData := data[offset : offset+entrySize]
-		entryType, pid, username, tty, host, loginTime := parseUtmpEntry(entryData)
+		
+		entryType := int32(data[offset]) | int32(data[offset+1])<<8 | int32(data[offset+2])<<16 | int32(data[offset+3])<<24
+		
+		// Only process if this looks like a valid entry type
+		if entryType < 0 || entryType > 9 {
+			continue
+		}
+		
+		// Skip if not at expected boundary and not a user-related entry
+		if offset%384 != 0 && entryType != USER_PROCESS && entryType != DEAD_PROCESS {
+			continue
+		}
+		
+		entryData := data[offset : offset+384]
+		if offset+384 > len(data) {
+			entryData = data[offset:]
+		}
+		
+		parsedType, pid, username, tty, host, loginTime := parseUtmpEntry(entryData)
 
 		if *debugMode {
-			log.Printf("Entry %d: type=%d, pid=%d, user='%s', line='%s', host='%s'", 
-				i, entryType, pid, username, tty, host)
+			if offset%384 == 0 {
+				log.Printf("Entry %d (offset 0x%x): type=%d, pid=%d, user='%s', line='%s', host='%s'", 
+					entryIndex, offset, parsedType, pid, username, tty, host)
+			} else if parsedType == USER_PROCESS || parsedType == DEAD_PROCESS {
+				log.Printf("Misaligned entry at offset 0x%x: type=%d, pid=%d, user='%s', line='%s', host='%s'", 
+					offset, parsedType, pid, username, tty, host)
+			}
 		}
 
-		// Only process USER_PROCESS entries (active user sessions)
-		if entryType != USER_PROCESS {
+		// Only process USER_PROCESS entries (active user sessions) and DEAD_PROCESS (recently ended sessions)
+		if parsedType != USER_PROCESS && parsedType != DEAD_PROCESS {
 			continue
 		}
 
@@ -176,11 +305,21 @@ func collectUserMetrics() {
 			continue
 		}
 
+		// For DEAD_PROCESS, only include if it's recent (within last hour)
+		if parsedType == DEAD_PROCESS {
+			if time.Since(loginTime) > time.Hour {
+				if *debugMode {
+					log.Printf("Skipping old DEAD_PROCESS entry: %s (age: %v)", username, time.Since(loginTime))
+				}
+				continue
+			}
+		}
+
 		loginTimeStr := loginTime.Format("2006-01-02 15:04")
 
 		if *debugMode {
-			log.Printf("Found user session: user=%s, tty=%s, host=%s, time=%s", 
-				username, tty, host, loginTimeStr)
+			log.Printf("Found user session: user=%s, tty=%s, host=%s, time=%s, type=%d", 
+				username, tty, host, loginTimeStr, parsedType)
 		}
 
 		validSessions++
@@ -199,6 +338,11 @@ func collectUserMetrics() {
 			from = "-"
 		}
 		userSessions.WithLabelValues(username, from, tty, loginTimeStr).Set(1)
+		
+		// Skip ahead to avoid processing the same entry multiple times
+		if offset%384 != 0 {
+			offset = ((offset / 384) + 1) * 384 - 4 // -4 because loop will add 4
+		}
 	}
 
 	// Set total users metric
@@ -225,7 +369,9 @@ func main() {
 
 	if *debugMode {
 		log.Println("Debug mode enabled")
+		log.Printf("Architecture: %s/%s", runtime.GOOS, runtime.GOARCH)
 		log.Printf("Using utmp file: %s", *utmpPath)
+		log.Printf("Expected utmp entry size: 384 bytes")
 	}
 
 	// Initial collection
