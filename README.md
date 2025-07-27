@@ -5,6 +5,7 @@ A lightweight Prometheus exporter that monitors currently logged-in users on Uni
 ## Features
 
 - **Direct utmp file parsing** - No dependency on system commands, works reliably in containers
+- **Cross-architecture compatibility** - Full support for x86_64, ARM64, and ARMv7 systems
 - **Comprehensive user session metrics** including:
   - Username and session count
   - TTY/terminal information
@@ -265,13 +266,4 @@ MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Changelog
 
-### v2.0.0
-- **Breaking**: Replaced system command dependency with direct utmp parsing
-- **New**: Full Docker container support without special privileges
-- **New**: Multi-architecture Docker images
-- **Improved**: More reliable user session detection
-- **Improved**: Better error handling and debug output
-- **Fixed**: Container isolation issues
-
-### v1.0.0
-- Initial release with system command-based parsing
+See [CHANGELOG.md](CHANGELOG.md) for detailed release notes and version history.
