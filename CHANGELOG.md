@@ -25,7 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Error handling**: Better validation and graceful handling of malformed utmp data
 - **Build system**: Added multi-architecture Docker build script
 
-## [v2.0.0] - 2023-07-23
+## [v2.0.0] - 2025-07-23
 
 ### Breaking Changes
 - **Replaced system command dependency** with direct utmp parsing
@@ -39,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Container isolation issues**
 
-## [v1.0.0] - 2023-07-22
+## [v1.0.0] - 2025-07-22
 
 ### Added
 - Initial release with system command-based parsing
